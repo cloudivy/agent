@@ -1,110 +1,95 @@
 import streamlit as st
-from typing import TypedDict, Annotated, List
-import operator
-from langgraph.graph import StateGraph, END
-from langchain_ollama import ChatOllama
-from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage, AIMessage
-from langgraph.visual import draw_ascii  # Simple ASCII graph
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+import io
 
-# Local free LLM (run `ollama pull llama3.2` first)
-@st.cache_resource
-def get_llm():
-    return ChatOllama(model="llama3.2", temperature=0)
+st.set_page_config(page_title="Pipeline Digging vs Leak Analyzer", layout="wide", page_icon="🛢️")
 
-llm = get_llm()
+st.title("🛢️ Pipeline Digging vs Leak Events Analyzer")
+st.markdown("Upload your manual digging and LDS datasets to visualize correlations by chainage.")
 
-# PdM Tool
-@tool
-def check_sensor_history(sensor_id: str) -> str:
-    """Check pipeline sensor history for predictive maintenance."""
-    history = {
-        "42": "Past: 3 high vib alerts, SCC risk rising.",
-        "default": "Normal trends."
-    }
-    return history.get(sensor_id, "No history.")
+# File uploaders
+col1, col2 = st.columns(2)
+with col1:
+    digging_file = st.file_uploader("Upload Manual Digging Data (CSV/Excel)", type=['csv', 'xlsx', 'xls'], key="digging")
+with col2:
+    leaks_file = st.file_uploader("Upload LDS Leak Data (CSV/Excel)", type=['csv', 'xlsx', 'xls'], key="leaks")
 
-llm_with_tools = llm.bind_tools([check_sensor_history])
+# Fixed tolerance
+tolerance = 1.0
+st.info(f"🔧 Fixed Chainage Tolerance: {tolerance} km")
 
-# Agent State (memory + comms)
-class PdMState(TypedDict):
-    messages: Annotated[List[HumanMessage | AIMessage], operator.add]
-    memory: List[str]
-    next_agent: str
-
-# Supervisor: Tool calling + routing
-def supervisor(state: PdMState) -> PdMState:
-    last_msg = state["messages"][-1]
-    response = llm_with_tools.invoke(state["messages"])
-    state["messages"] += [response]
-    content = response.content.lower()
-    state["next_agent"] = "expert" if "critical" in content or "high" in content else END
-    state["memory"].append(f"Routed {last_msg.content[:50]}...")
-    return state
-
-# Expert: Final action
-def expert_agent(state: PdMState) -> PdMState:
-    expert_msg = AIMessage(content="Expert: Schedule drone inspection & notify ops team.")
-    state["messages"] += [expert_msg]
-    state["memory"].append("Action: Inspection dispatched")
-    state["next_agent"] = END
-    return state
-
-# Build & compile graph
-workflow = StateGraph(PdMState)
-workflow.add_node("supervisor", supervisor)
-workflow.add_node("expert", expert_agent)
-workflow.set_entry_point("supervisor")
-workflow.add_conditional_edges(
-    "supervisor", 
-    lambda s: s["next_agent"],
-    {"expert": "expert", END: END}
-)
-workflow.add_edge("expert", END)
-pdm_app = workflow.compile()
-
-# Streamlit UI
-st.title("🛢️ Pipeline PdM Agent Visualizer")
-st.markdown("**Free local Ollama + LangGraph + Tools/Memory/Comms**")
-
-# ASCII Graph Viz
-with st.expander("Agent Workflow Graph"):
-    st.code(draw_ascii(pdm_app), language="text")
-
-# Input
-alert = st.text_input("Enter Pipeline Alert (e.g., 'Sensor 42 high vibration'):")
-sensor = st.text_input("Sensor ID:", "42")
-
-if st.button("🚀 Run Agent Simulation", type="primary"):
-    initial_state = {
-        "messages": [HumanMessage(content=f"{alert} [Sensor: {sensor}]")],
-        "memory": st.session_state.get("memory", []),
-        "next_agent": ""
-    }
-    with st.spinner("Agent thinking..."):
-        result = pdm_app.invoke(initial_state)
-    
-    # Results
-    st.subheader("📱 Agent Messages")
-    for msg in result["messages"]:
-        with st.chat_message("user" if isinstance(msg, HumanMessage) else "assistant"):
-            st.write(msg.content)
-    
-    st.subheader("🧠 Agent Memory")
-    st.write(result["memory"])
-    
-    # Persist memory
-    if "memory" not in st.session_state:
-        st.session_state.memory = []
-    st.session_state.memory.extend(result["memory"])
-
-# Ollama Status
-if st.button("Check Ollama"):
+if digging_file is not None and leaks_file is not None:
     try:
-        test = llm.invoke([HumanMessage(content="Status?")])
-        st.success("✅ Ollama running!")
-    except:
-        st.error("❌ Install Ollama & run `ollama pull llama3.2`")
+        df_manual_digging = pd.read_csv(digging_file) if digging_file.name.endswith('.csv') else pd.read_excel(digging_file)
+        df_lds_IV = pd.read_csv(leaks_file) if leaks_file.name.endswith('.csv') else pd.read_excel(leaks_file)
+        
+        st.success("✅ Data loaded successfully!")
+        st.dataframe(df_manual_digging.head(), use_container_width=True)
+        st.dataframe(df_lds_IV.head(), use_container_width=True)
+        
+        # Extract unique chainages
+        unique_chainages_dig = sorted(df_manual_digging['Original_chainage'].unique())
+        unique_chainages_leak = sorted(df_lds_IV['chainage'].unique())
+        unique_chainages = sorted(set(unique_chainages_dig).union(unique_chainages_leak))
+        
+        st.subheader("Select Chainage(s) to Analyze")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            selected_chainages = st.multiselect("Chainages", unique_chainages, default=unique_chainages[:3])
+        with col_b:
+            max_plots = st.slider("Max Plots per Run", 1, 10, 5)
+        
+        if selected_chainages:
+            st.subheader("Visualizations (Tolerance: 1.0 km)")
+            for i, target_chainage_val in enumerate(selected_chainages[:max_plots]):
+                df_digging_filtered = df_manual_digging[abs(df_manual_digging['Original_chainage'] - target_chainage_val) <= tolerance]
+                df_leaks_filtered = df_lds_IV[abs(df_lds_IV['chainage'] - target_chainage_val) <= tolerance]
+                
+                if not df_digging_filtered.empty or not df_leaks_filtered.empty:
+                    plt.figure(figsize=(18, 10))
+                    
+                    if not df_digging_filtered.empty:
+                        sns.scatterplot(data=df_digging_filtered, x='DateTime', y='Original_chainage', 
+                                      color='blue', label='Digging Events', marker='o', s=50)
+                    
+                    if not df_leaks_filtered.empty:
+                        sns.scatterplot(data=df_leaks_filtered, x='DateTime', y='chainage', 
+                                      color='red', label='Leak Events', marker='X', s=80)
+                    
+                    plt.title(f'Digging vs. Leak Events at Chainage {target_chainage_val:.1f} (Tolerance: {tolerance:.1f} km)')
+                    plt.xlabel('Date and Time')
+                    plt.ylabel('Chainage')
+                    plt.grid(True)
+                    plt.legend(title='Event Type', bbox_to_anchor=(1.05, 1), loc='upper left')
+                    plt.subplots_adjust(right=0.75)
+                    st.pyplot(plt)
+                    plt.close()  # Prevent memory buildup
+                    st.caption(f"Chainage {target_chainage_val:.1f}: {len(df_digging_filtered)} digging, {len(df_leaks_filtered)} leaks")
+                else:
+                    st.warning(f"No events at chainage {target_chainage_val:.1f} ± {tolerance} km.")
+            
+            # Export
+            st.subheader("Export Results")
+            all_results = []
+            for target_chainage_val in selected_chainages:
+                df_digging_filtered = df_manual_digging[abs(df_manual_digging['Original_chainage'] - target_chainage_val) <= tolerance]
+                df_leaks_filtered = df_lds_IV[abs(df_lds_IV['chainage'] - target_chainage_val) <= tolerance]
+                df_digging_filtered['target_chainage'] = target_chainage_val
+                df_leaks_filtered['target_chainage'] = target_chainage_val
+                all_results.extend([df_digging_filtered, df_leaks_filtered])
+            
+            if all_results:
+                combined_df = pd.concat(all_results, ignore_index=True)
+                csv_buffer = io.StringIO()
+                combined_df.to_csv(csv_buffer, index=False)
+                st.download_button("📥 Download Results CSV", csv_buffer.getvalue(), "chainage_analysis.csv")
+                
+    except Exception as e:
+        st.error(f"❌ Error: {str(e)}. Check columns: 'DateTime', 'Original_chainage' / 'chainage'.")
+else:
+    st.info("👆 Upload both files to begin. Fixed tolerance: 1.0 km.")
 
-st.info("💡 Deploy: GitHub → Streamlit Cloud (free)")
-
+# requirements.txt remains the same
