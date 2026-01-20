@@ -1,95 +1,65 @@
 import streamlit as st
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
-import io
+from groq import Groq
 
-st.set_page_config(page_title="Pipeline Digging vs Leak Analyzer", layout="wide", page_icon="🛢️")
+st.set_page_config(page_title="Groq LLM Chat", page_icon="🤖", layout="wide")
 
-st.title("🛢️ Pipeline Digging vs Leak Events Analyzer")
-st.markdown("Upload your manual digging and LDS datasets to visualize correlations by chainage.")
+st.sidebar.title("🔧 Settings")
+api_key = st.sidebar.text_input("Groq API Key", value="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", type="password")
+model = st.sidebar.selectbox("Model", 
+    ["llama3-8b-8192", "llama3-70b-8192", "llama-3.3-70b-versatile", 
+     "mixtral-8x7b-32768", "gemma2-9b-it", "llama3-groq-70b-8192-tool-use-preview"])
 
-# File uploaders
-col1, col2 = st.columns(2)
-with col1:
-    digging_file = st.file_uploader("Upload Manual Digging Data (CSV/Excel)", type=['csv', 'xlsx', 'xls'], key="digging")
-with col2:
-    leaks_file = st.file_uploader("Upload LDS Leak Data (CSV/Excel)", type=['csv', 'xlsx', 'xls'], key="leaks")
+# Test connection button
+if st.sidebar.button("🧪 Test API", use_container_width=True):
+    if api_key:
+        try:
+            client = Groq(api_key=api_key)
+            response = client.chat.completions.create(
+                model=model, 
+                messages=[{"role": "user", "content": "Confirm: Groq API working?"}],
+                max_tokens=20
+            )
+            st.sidebar.success(f"✅ Connected! Response: {response.choices[0].message.content}")
+        except Exception as e:
+            st.sidebar.error(f"❌ Error: {str(e)}")
 
-# Fixed tolerance
-tolerance = 1.0
-st.info(f"🔧 Fixed Chainage Tolerance: {tolerance} km")
+# Chat session
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "assistant", "content": "Hi! Ready for ML research, pipelines, or agent sims chats."}]
 
-if digging_file is not None and leaks_file is not None:
-    try:
-        df_manual_digging = pd.read_csv(digging_file) if digging_file.name.endswith('.csv') else pd.read_excel(digging_file)
-        df_lds_IV = pd.read_csv(leaks_file) if leaks_file.name.endswith('.csv') else pd.read_excel(leaks_file)
+st.title("🤖 Fast Groq LLM Chat")
+chat_container = st.container()
+with chat_container:
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+if prompt := st.chat_input("Ask about context drift, anomaly detection, or anything..."):
+    if not api_key.startswith("gsk_"):
+        st.error("Enter valid Groq API key (starts with gsk_) in sidebar!")
+    else:
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
         
-        st.success("✅ Data loaded successfully!")
-        st.dataframe(df_manual_digging.head(), use_container_width=True)
-        st.dataframe(df_lds_IV.head(), use_container_width=True)
-        
-        # Extract unique chainages
-        unique_chainages_dig = sorted(df_manual_digging['Original_chainage'].unique())
-        unique_chainages_leak = sorted(df_lds_IV['chainage'].unique())
-        unique_chainages = sorted(set(unique_chainages_dig).union(unique_chainages_leak))
-        
-        st.subheader("Select Chainage(s) to Analyze")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            selected_chainages = st.multiselect("Chainages", unique_chainages, default=unique_chainages[:3])
-        with col_b:
-            max_plots = st.slider("Max Plots per Run", 1, 10, 5)
-        
-        if selected_chainages:
-            st.subheader("Visualizations (Tolerance: 1.0 km)")
-            for i, target_chainage_val in enumerate(selected_chainages[:max_plots]):
-                df_digging_filtered = df_manual_digging[abs(df_manual_digging['Original_chainage'] - target_chainage_val) <= tolerance]
-                df_leaks_filtered = df_lds_IV[abs(df_lds_IV['chainage'] - target_chainage_val) <= tolerance]
-                
-                if not df_digging_filtered.empty or not df_leaks_filtered.empty:
-                    plt.figure(figsize=(18, 10))
-                    
-                    if not df_digging_filtered.empty:
-                        sns.scatterplot(data=df_digging_filtered, x='DateTime', y='Original_chainage', 
-                                      color='blue', label='Digging Events', marker='o', s=50)
-                    
-                    if not df_leaks_filtered.empty:
-                        sns.scatterplot(data=df_leaks_filtered, x='DateTime', y='chainage', 
-                                      color='red', label='Leak Events', marker='X', s=80)
-                    
-                    plt.title(f'Digging vs. Leak Events at Chainage {target_chainage_val:.1f} (Tolerance: {tolerance:.1f} km)')
-                    plt.xlabel('Date and Time')
-                    plt.ylabel('Chainage')
-                    plt.grid(True)
-                    plt.legend(title='Event Type', bbox_to_anchor=(1.05, 1), loc='upper left')
-                    plt.subplots_adjust(right=0.75)
-                    st.pyplot(plt)
-                    plt.close()  # Prevent memory buildup
-                    st.caption(f"Chainage {target_chainage_val:.1f}: {len(df_digging_filtered)} digging, {len(df_leaks_filtered)} leaks")
-                else:
-                    st.warning(f"No events at chainage {target_chainage_val:.1f} ± {tolerance} km.")
-            
-            # Export
-            st.subheader("Export Results")
-            all_results = []
-            for target_chainage_val in selected_chainages:
-                df_digging_filtered = df_manual_digging[abs(df_manual_digging['Original_chainage'] - target_chainage_val) <= tolerance]
-                df_leaks_filtered = df_lds_IV[abs(df_lds_IV['chainage'] - target_chainage_val) <= tolerance]
-                df_digging_filtered['target_chainage'] = target_chainage_val
-                df_leaks_filtered['target_chainage'] = target_chainage_val
-                all_results.extend([df_digging_filtered, df_leaks_filtered])
-            
-            if all_results:
-                combined_df = pd.concat(all_results, ignore_index=True)
-                csv_buffer = io.StringIO()
-                combined_df.to_csv(csv_buffer, index=False)
-                st.download_button("📥 Download Results CSV", csv_buffer.getvalue(), "chainage_analysis.csv")
-                
-    except Exception as e:
-        st.error(f"❌ Error: {str(e)}. Check columns: 'DateTime', 'Original_chainage' / 'chainage'.")
-else:
-    st.info("👆 Upload both files to begin. Fixed tolerance: 1.0 km.")
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            full_response = ""
+            client = Groq(api_key=api_key)
+            stream = client.chat.completions.create(
+                model=model,
+                messages=st.session_state.messages,
+                temperature=0.7,
+                stream=True
+            )
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    full_response += chunk.choices[0].delta.content
+                    message_placeholder.markdown(full_response + "▌")
+            message_placeholder.markdown(full_response)
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
 
-# requirements.txt remains the same
+# Clear chat
+if st.sidebar.button("🗑️ Clear Chat"):
+    st.session_state.messages = [{"role": "assistant", "content": "Chat cleared! Start fresh."}]
+    st.rerun()
