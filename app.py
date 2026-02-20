@@ -2,125 +2,128 @@ import streamlit as st
 import os
 from typing import TypedDict, Annotated, List
 from langgraph.graph import StateGraph, START, END
-from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
-# API Key Check & LLM Setup
-@st.cache_resource
-def get_llm():
-    api_key = st.secrets.get("OPENAI_API_KEY", "")
-    if not api_key:
-        st.error("❌ **Add `OPENAI_API_KEY` to Streamlit Cloud Secrets!**")
-        st.stop()
-    return ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key)
+# ========================================
+# API KEY CHECK - FIXED
+# ========================================
+api_key = st.secrets.get("OPENAI_API_KEY", "")
+if not api_key:
+    st.title("🔑 Multi-Agent Platform")
+    st.error("❌ **Please add `OPENAI_API_KEY` in Settings → Secrets**")
+    st.info("👉 Go to hamburger menu (top-right) → Settings → Secrets")
+    st.stop()
 
-llm = get_llm()
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key)
 
-# Agent State
+# ========================================
+# AGENT STATE & FUNCTIONS
+# ========================================
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], "append"]
     next: str
 
-# Agent Functions (Simple prompts - no external tools needed)
-@st.cache_resource
-def researcher_agent():
-    return llm.bind_tools([],
-        system_message="You are RESEARCHER. Research deeply and provide detailed facts only.")
-
-@st.cache_resource
-def analyst_agent():
-    return llm.bind_tools([],
-        system_message="You are ANALYST. Analyze information and extract key insights.")
-
-@st.cache_resource
-def writer_agent():
-    return llm.bind_tools([],
-        system_message="You are WRITER. Create clear, concise final reports.")
-
 def supervisor(state):
-    """Routes to correct agent based on task"""
     last_msg = state["messages"][-1].content.lower()
-    if any(word in last_msg for word in ["research", "find", "data"]):
+    if any(word in last_msg for word in ["research", "find", "data", "info"]):
         return {"next": "researcher"}
     elif any(word in last_msg for word in ["analyze", "insight", "summary"]):
         return {"next": "analyst"}
     else:
         return {"next": "writer"}
 
+@st.cache_resource
+def create_agents():
+    researcher = llm.bind(
+        system_message="You are RESEARCHER. Provide detailed facts and research only.")
+    analyst = llm.bind(
+        system_message="You are ANALYST. Analyze data and extract key insights.")
+    writer = llm.bind(
+        system_message="You are WRITER. Create clear, concise final reports.")
+    return researcher, analyst, writer
+
 def call_agent(state, agent):
-    """Call agent and return response"""
     result = agent.invoke(state["messages"])
     return {"messages": [result]}
 
-# Build Graph
-@st.cache_resource
-def create_graph():
+# ========================================
+# BUILD GRAPH
+# ========================================
+@st.cache_resource 
+def get_workflow():
+    researcher, analyst, writer = create_agents()
+    
     workflow = StateGraph(state_schema=AgentState)
     
-    # Add nodes
     workflow.add_node("supervisor", supervisor)
-    workflow.add_node("researcher", lambda state: call_agent(state, researcher_agent()))
-    workflow.add_node("analyst", lambda state: call_agent(state, analyst_agent()))
-    workflow.add_node("writer", lambda state: call_agent(state, writer_agent()))
+    workflow.add_node("researcher", lambda s: call_agent(s, researcher))
+    workflow.add_node("analyst", lambda s: call_agent(s, analyst))
+    workflow.add_node("writer", lambda s: call_agent(s, writer))
     
-    # Add edges
     workflow.add_edge(START, "supervisor")
     workflow.add_conditional_edges(
-        "supervisor",
-        lambda state: state["next"],
-        {
-            "researcher": "researcher",
-            "analyst": "analyst", 
-            "writer": "writer"
-        }
+        "supervisor", 
+        lambda s: s["next"],
+        {"researcher": "researcher", "analyst": "analyst", "writer": "writer"}
     )
     workflow.add_edge("writer", END)
     
     return workflow.compile()
 
-# Streamlit UI
-st.title("🤖 Multi-Agent Platform")
-st.caption("Researcher → Analyst → Writer | Persistent memory | OpenAI-powered")
+# ========================================
+# STREAMLIT UI
+# ========================================
+st.title("🤖 Multi-Agent Research Platform")
+st.markdown("**Researcher → Analyst → Writer** | Powered by GPT-4o-mini")
 
 # Chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat
-for message in st.session_state.messages:
-    with st.chat_message(message.type):
-        st.markdown(message.content)
+# Show chat history
+for msg in st.session_state.messages:
+    with st.chat_message(msg.type):
+        st.markdown(msg.content)
 
-# Chat input
-if prompt := st.chat_input("Ask anything... e.g., 'Research AI agents'"):
-    
+# ========================================
+# BIG PROMINENT CHAT INPUT (THIS IS YOUR REQUEST)
+# ========================================
+st.markdown("---")
+prompt = st.chat_input(
+    "💬 **Enter your research task here...** (e.g., 'Research context drift in AI agents')",
+    key="main_input"
+)
+
+if prompt:
     # Add user message
     st.session_state.messages.append(HumanMessage(content=prompt))
     with st.chat_message("user"):
         st.markdown(prompt)
     
+    # Run multi-agent system
     with st.chat_message("assistant"):
-        with st.spinner("🤖 Agents collaborating..."):
-            # Run multi-agent workflow
-            graph = create_graph()
-            result = graph.invoke({"messages": [HumanMessage(content=prompt)]})
+        with st.spinner("🤖 **Agents collaborating:** Supervisor → Researcher → Analyst → Writer..."):
+            graph = get_workflow()
+            result = graph.invoke({"messages": st.session_state.messages})
             
-            # Display final response
+            # Show final response
             final_msg = result["messages"][-1]
             st.markdown(final_msg.content)
             st.session_state.messages.append(final_msg)
 
-# Sidebar Instructions
+# ========================================
+# SIDEBAR HELP
+# ========================================
 with st.sidebar:
-    st.markdown("### 📋 Quick Start")
-    st.code("""
-1. Settings → Secrets → Add:
-   OPENAI_API_KEY="sk-proj-..."
-
-2. Try these tasks:
-   • "Research context drift"
-   • "Analyze AI agent frameworks" 
-   • "Write PdM report"
-    """, language="text")
-    st.caption("Built for Divya Mittal | IOCL Research")
+    st.header("📋 Example Prompts")
+    st.markdown("""
+    - "Research context drift in multi-agent systems"
+    - "Analyze LangGraph vs CrewAI" 
+    - "Write PdM pipeline report"
+    - "Find AI agent memory techniques"
+    """)
+    
+    st.markdown("---")
+    st.success("✅ **API Key Working!**")
+    st.info("👉 Type in the **big input box below**")
