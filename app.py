@@ -1,72 +1,83 @@
 import streamlit as st
-from groq import Groq
+from typing import TypedDict, Annotated, List
+from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import create_react_agent
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
-st.set_page_config(page_title="Groq LLM Chat", page_icon="🤖", layout="wide")
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-st.sidebar.title("🔧 Settings")
-api_key = st.sidebar.text_input("Groq API Key", value="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", type="password")
-model = st.sidebar.selectbox("Model", 
-    ["llama3-8b-8192", "llama3-70b-8192", "llama-3.3-70b-versatile", 
-     "mixtral-8x7b-32768", "gemma2-9b-it"])
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], "append"]
+    next: str
 
-# Test connection (moved before chat)
-if st.sidebar.button("🧪 Test API", use_container_width=True):
-    if api_key and api_key.startswith("gsk_"):
-        try:
-            client = Groq(api_key=api_key)
-            response = client.chat.completions.create(
-                model=model, 
-                messages=[{"role": "user", "content": "Groq API working?"}],
-                max_tokens=20
-            )
-            st.sidebar.success(f"✅ Success: {response.choices[0].message.content}")
-        except Exception as e:
-            st.sidebar.error(f"❌ Test failed: {str(e)}")
+@st.cache_resource
+def load_researcher():
+    prompt = "You are a Researcher. Research the topic deeply and provide facts."
+    return create_react_agent(llm, [], prompt)  # Add tools later
+
+@st.cache_resource
+def load_analyst():
+    prompt = "You are an Analyst. Analyze the research and extract key insights."
+    return create_react_agent(llm, [], prompt)
+
+@st.cache_resource
+def load_writer():
+    prompt = "You are a Writer. Summarize insights into a clear final report."
+    return create_react_agent(llm, [], prompt)
+
+def supervisor_node(state: AgentState):
+    msg = state["messages"][-1].content
+    if "research" in msg.lower():
+        return {"next": "researcher"}
+    elif "analyze" in msg.lower():
+        return {"next": "analyst"}
     else:
-        st.sidebar.warning("Enter valid key (starts with gsk_)")
+        return {"next": "writer"}
 
-# Chat session
+def agent_node(state: AgentState, agent):
+    result = agent.invoke(state)
+    return {"messages": result["messages"]}
+
+# Chat history persistence
 if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Hi researcher! Chat about LLMs, pipelines, or agents."}]
+    st.session_state.messages = []
+if "thread_id" not in st.session_state:
+    st.session_state.thread_id = "session_1"
 
-st.title("🤖 Groq LLM Chat")
+st.title("🚀 Simple Multi-Agent Platform")
+st.caption("Supervisor routes to Researcher → Analyst → Writer for end-to-end tasks.")
+
+# Chat display
 for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+    with st.chat_message(msg.type):
+        st.markdown(msg.content)
 
-# Chat input - FIXED: Client init inside try + key check
-if prompt := st.chat_input("Your query..."):
-    if not api_key or not api_key.startswith("gsk_"):
-        st.error("⚠️ Add valid Groq API key in sidebar first!")
-    else:
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        
-        with st.chat_message("assistant"):
-            message_placeholder = st.empty()
-            full_response = ""
-            try:
-                client = Groq(api_key=api_key)  # Init here, protected
-                stream = client.chat.completions.create(
-                    model=model,
-                    messages=st.session_state.messages,
-                    temperature=0.7,
-                    stream=True
-                )
-                for chunk in stream:
-                    if chunk.choices[0].delta.content:
-                        full_response += chunk.choices[0].delta.content
-                        message_placeholder.markdown(full_response + "▌")
-                message_placeholder.markdown(full_response)
-            except Exception as e:
-                error_msg = f"Error: {str(e)}. Check key/model/quotas."
-                message_placeholder.error(error_msg)
-                full_response = error_msg
-            
-            st.session_state.messages.append({"role": "assistant", "content": full_response})
+# User input
+if prompt := st.chat_input("Enter task e.g., 'Research AI agents'"):
+    st.session_state.messages.append(HumanMessage(content=prompt))
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-if st.sidebar.button("🗑️ Clear Chat", use_container_width=True):
-    st.session_state.messages = [{"role": "assistant", "content": "Cleared! Ready."}]
-    st.rerun()
+    with st.chat_message("assistant"):
+        with st.spinner("Agents collaborating..."):
+            # Build graph
+            workflow = StateGraph(state_schema=AgentState)
+            workflow.add_node("supervisor", supervisor_node)
+            workflow.add_node("researcher", lambda s: agent_node(s, load_researcher()))
+            workflow.add_node("analyst", lambda s: agent_node(s, load_analyst()))
+            workflow.add_node("writer", lambda s: agent_node(s, load_writer()))
 
+            workflow.add_edge(START, "supervisor")
+            workflow.add_conditional_edges("supervisor", lambda s: s["next"])
+            workflow.add_edge("writer", END)
+
+            app = workflow.compile()
+
+            # Run
+            for chunk in app.stream({"messages": [HumanMessage(content=prompt)]}, {"configurable": {"thread_id": st.session_state.thread_id}}):
+                if "messages" in chunk:
+                    for msg in chunk["messages"]:
+                        if isinstance(msg, AIMessage):
+                            st.markdown(msg.content)
+                            st.session_state.messages.append(msg)
