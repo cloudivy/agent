@@ -1,129 +1,110 @@
 import streamlit as st
-import os
-from typing import TypedDict, Annotated, List
-from langgraph.graph import StateGraph, START, END
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage
+import os
 
 # ========================================
-# API KEY CHECK - FIXED
+# API KEY CHECK
 # ========================================
-api_key = st.secrets.get("OPENAI_API_KEY", "")
+st.title("🤖 Multi-Agent Platform")
+st.markdown("**Supervisor → Researcher → Analyst → Writer**")
+
+api_key = st.secrets.get("OPENAI_API_KEY")
 if not api_key:
-    st.title("🔑 Multi-Agent Platform")
-    st.error("❌ **Please add `OPENAI_API_KEY` in Settings → Secrets**")
-    st.info("👉 Go to hamburger menu (top-right) → Settings → Secrets")
+    st.error("❌ **Add `OPENAI_API_KEY` in Settings → Secrets**")
+    st.markdown("---")
+    st.markdown("""
+    **Steps:**
+    1. Click hamburger menu (☰) top-right
+    2. Settings → Secrets 
+    3. Add: `OPENAI_API_KEY="sk-proj-your-key"`
+    """)
     st.stop()
 
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key)
 
 # ========================================
-# AGENT STATE & FUNCTIONS
+# CHAT HISTORY
 # ========================================
-class AgentState(TypedDict):
-    messages: Annotated[List[BaseMessage], "append"]
-    next: str
-
-def supervisor(state):
-    last_msg = state["messages"][-1].content.lower()
-    if any(word in last_msg for word in ["research", "find", "data", "info"]):
-        return {"next": "researcher"}
-    elif any(word in last_msg for word in ["analyze", "insight", "summary"]):
-        return {"next": "analyst"}
-    else:
-        return {"next": "writer"}
-
-@st.cache_resource
-def create_agents():
-    researcher = llm.bind(
-        system_message="You are RESEARCHER. Provide detailed facts and research only.")
-    analyst = llm.bind(
-        system_message="You are ANALYST. Analyze data and extract key insights.")
-    writer = llm.bind(
-        system_message="You are WRITER. Create clear, concise final reports.")
-    return researcher, analyst, writer
-
-def call_agent(state, agent):
-    result = agent.invoke(state["messages"])
-    return {"messages": [result]}
-
-# ========================================
-# BUILD GRAPH
-# ========================================
-@st.cache_resource 
-def get_workflow():
-    researcher, analyst, writer = create_agents()
-    
-    workflow = StateGraph(state_schema=AgentState)
-    
-    workflow.add_node("supervisor", supervisor)
-    workflow.add_node("researcher", lambda s: call_agent(s, researcher))
-    workflow.add_node("analyst", lambda s: call_agent(s, analyst))
-    workflow.add_node("writer", lambda s: call_agent(s, writer))
-    
-    workflow.add_edge(START, "supervisor")
-    workflow.add_conditional_edges(
-        "supervisor", 
-        lambda s: s["next"],
-        {"researcher": "researcher", "analyst": "analyst", "writer": "writer"}
-    )
-    workflow.add_edge("writer", END)
-    
-    return workflow.compile()
-
-# ========================================
-# STREAMLIT UI
-# ========================================
-st.title("🤖 Multi-Agent Research Platform")
-st.markdown("**Researcher → Analyst → Writer** | Powered by GPT-4o-mini")
-
-# Chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 # Show chat history
-for msg in st.session_state.messages:
-    with st.chat_message(msg.type):
-        st.markdown(msg.content)
+for message in st.session_state.messages:
+    with st.chat_message(message.type):
+        st.markdown(message.content)
 
 # ========================================
-# BIG PROMINENT CHAT INPUT (THIS IS YOUR REQUEST)
+# BIG CLEAR CHAT INPUT (YOUR REQUEST)
 # ========================================
 st.markdown("---")
+st.markdown("### 💬 **Enter your task below**")
+
 prompt = st.chat_input(
-    "💬 **Enter your research task here...** (e.g., 'Research context drift in AI agents')",
-    key="main_input"
+    "Type here... e.g., 'Research context drift', 'Analyze AI frameworks', 'Write PdM report'",
+    key="chat_input"
 )
 
+# ========================================
+# PROCESS INPUT - SIMPLIFIED MULTI-AGENT
+# ========================================
 if prompt:
-    # Add user message
+    # Add user message to chat
     st.session_state.messages.append(HumanMessage(content=prompt))
     with st.chat_message("user"):
         st.markdown(prompt)
     
-    # Run multi-agent system
     with st.chat_message("assistant"):
-        with st.spinner("🤖 **Agents collaborating:** Supervisor → Researcher → Analyst → Writer..."):
-            graph = get_workflow()
-            result = graph.invoke({"messages": st.session_state.messages})
+        with st.spinner("🤖 Agents working..."):
             
-            # Show final response
-            final_msg = result["messages"][-1]
-            st.markdown(final_msg.content)
-            st.session_state.messages.append(final_msg)
+            # SUPERVISOR: Route task
+            supervisor_prompt = f"""
+            You are SUPERVISOR. Route this task: "{prompt}"
+            
+            Choose ONE agent:
+            - RESEARCHER (if research/data needed)  
+            - ANALYST (if analysis/insights needed)
+            - WRITER (if report/summary needed)
+            
+            Respond with ONLY: "RESEARCHER" or "ANALYST" or "WRITER"
+            """
+            supervisor_role = llm.invoke(supervisor_prompt).content.strip()
+            
+            st.markdown(f"**📋 Supervisor routed to:** *{supervisor_role}*")
+            
+            # AGENT WORKFLOW
+            if "RESEARCH" in supervisor_role.upper():
+                research_prompt = f"""You are RESEARCHER. Research "{prompt}" and provide detailed facts only."""
+                response = llm.invoke(research_prompt)
+                
+            elif "ANALYS" in supervisor_role.upper():
+                analysis_prompt = f"""You are ANALYST. Analyze "{prompt}" and extract key insights."""
+                response = llm.invoke(analysis_prompt)
+                
+            else:  # WRITER
+                writer_prompt = f"""You are WRITER. Create clear final report for "{prompt}"."""
+                response = llm.invoke(writer_prompt)
+            
+            # Show result
+            st.markdown(response.content)
+            st.session_state.messages.append(AIMessage(content=response.content))
 
 # ========================================
-# SIDEBAR HELP
+# SIDEBAR - EXAMPLE PROMPTS
 # ========================================
 with st.sidebar:
-    st.header("📋 Example Prompts")
-    st.markdown("""
-    - "Research context drift in multi-agent systems"
-    - "Analyze LangGraph vs CrewAI" 
-    - "Write PdM pipeline report"
-    - "Find AI agent memory techniques"
-    """)
+    st.header("🎯 Example Tasks")
+    examples = [
+        "Research context drift in AI agents",
+        "Analyze LangGraph vs CrewAI", 
+        "Write pipeline PdM report",
+        "Research agent memory techniques"
+    ]
+    
+    for example in examples:
+        if st.button(example, key=example):
+            st.session_state.messages = [HumanMessage(content=example)]
+            st.rerun()
     
     st.markdown("---")
-    st.success("✅ **API Key Working!**")
-    st.info("👉 Type in the **big input box below**")
+    st.success("✅ **Your API key is working!**")
